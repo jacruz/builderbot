@@ -14,9 +14,8 @@ import {
     MessageUpsertType,
     isJidGroup,
     isJidBroadcast,
+    makeWASocket as makeWASocketOther,
 } from 'baileys'
-
-const makeWASocketOther = require('baileys').default
 
 export {
     makeWASocketOther,

@@ -88,30 +88,23 @@ class Queue<T> {
                 reject: (value: T | PromiseLike<T>) => void
             }
 
+            // Modo seguro por defecto: no limpia la cola al crear el timeout y gestiona timers por item
             const timer = ({ resolve }: ITimerPromise) =>
                 setTimeout(() => {
-                    console.log('no debe aparecer si la otra funcion del race se ejecuta primero 🙉🙉🙉🙉', fingerIdRef)
                     resolve('timeout' as unknown as T)
                 }, this.timeout)
 
             const timerPromise = new Promise<T>((resolve, reject) => {
-                if (item.cancelled) {
-                    reject('cancelled')
-                }
-                if (!this.timers.has(fingerIdRef)) {
-                    const refIdTimeOut = timer({ reject, resolve })
-                    clearTimeout(this.timers.get(fingerIdRef) as NodeJS.Timeout)
-                    this.timers.set(fingerIdRef, refIdTimeOut)
-                    this.clearAndDone(from, item)
-                    this.clearQueue(from)
-                    return refIdTimeOut
-                }
-
-                return this.timers.get(fingerIdRef) as unknown as Promise<T>
+                if (item.cancelled) return reject('cancelled' as unknown as any)
+                const existing = this.timers.get(fingerIdRef)
+                if (existing && typeof existing !== 'boolean') clearTimeout(existing as NodeJS.Timeout)
+                const refIdTimeOut = timer({ reject, resolve })
+                this.timers.set(fingerIdRef, refIdTimeOut)
             })
 
             const cancel = () => {
-                clearTimeout(this.timers.get(fingerIdRef) as NodeJS.Timeout)
+                const t = this.timers.get(fingerIdRef)
+                if (t && typeof t !== 'boolean') clearTimeout(t as NodeJS.Timeout)
                 this.timers.delete(fingerIdRef)
                 this.clearAndDone(from, item)
             }
@@ -121,7 +114,9 @@ class Queue<T> {
         return new Promise<T>((resolve, reject) => {
             const pid = queueByFrom.findIndex((i) => i.fingerIdRef === fingerIdRef)
             if (pid !== -1) {
-                this.clearQueue(from)
+                // Ignorar silenciosamente duplicados del mismo ID y resolver en éxito
+                this.logger.log(`${from}: DUPLICATE: ${fingerIdRef} (ignored)`)
+                return resolve('success' as unknown as T)
             }
 
             queueByFrom.push({
@@ -143,7 +138,8 @@ class Queue<T> {
     async processQueue(from: string): Promise<void> {
         const queueByFrom = this.queue.get(from)!
         while (queueByFrom.length > 0) {
-            const tasksToProcess = queueByFrom.splice(0, this.concurrencyLimit - 1)
+            // Procesar hasta el límite de concurrencia configurado
+            const tasksToProcess = queueByFrom.splice(0, this.concurrencyLimit)
             const promises = tasksToProcess.map((item) =>
                 this.processItem(from, item).finally(() => this.clearAndDone(from, item))
             )
@@ -163,7 +159,8 @@ class Queue<T> {
                 for (const item of queueByFrom) {
                     item.cancelled = true
                     this.clearAndDone(from, item)
-                    item.reject('Queue cleared')
+                    // Resolver silenciosamente las tareas pendientes al limpiar la cola
+                    item.resolve('success' as unknown as T)
                 }
             } finally {
                 this.queue.set(from, [])
@@ -179,7 +176,8 @@ class Queue<T> {
             if (workingByFrom) {
                 this.workingOnPromise.set(from, false)
             }
-            return queueByFrom.length
+            // Después de limpiar, no quedan elementos en cola.
+            return 0
         }
         return 0
     }

@@ -49,6 +49,11 @@ jest.mock('wa-sticker-formatter', () => {
 jest.mock('../src/utils', () => ({
     baileyCleanNumber: jest.fn().mockImplementation(() => phoneNumber),
     baileyIsValidNumber: jest.fn((number: string) => number === '1234567890'),
+    baileyCleanNumberWithLid: jest
+        .fn()
+        .mockImplementation((key: any) => key?.remoteJid || key?.senderPn || 'mocked-number'),
+    baileyGenerateImage: jest.fn(),
+    emptyDirSessions: jest.fn(),
 }))
 
 const mimeType = 'text/plain'
@@ -73,7 +78,7 @@ describe('#BaileysProvider', () => {
             name: 'test-bot',
             gifPlayback: true,
             usePairingCode: true,
-            browser: ['Windows', 'Chrome', 'Chrome 114.0.5735.198'],
+            browser: ['Windows', 'Chrome', 'Chrome 114.0.5735.198'] as any,
             phoneNumber: '+123456789',
             useBaileysStore: true,
             port: 3001,
@@ -96,7 +101,7 @@ describe('#BaileysProvider', () => {
             name: 'bot',
             gifPlayback: false,
             usePairingCode: false,
-            browser: ['Windows', 'Chrome', 'Chrome 114.0.5735.198'],
+            browser: ['Windows', 'Chrome', 'Chrome 114.0.5735.198'] as any,
             timeRelease: 0,
             phoneNumber: null,
             useBaileysStore: true,

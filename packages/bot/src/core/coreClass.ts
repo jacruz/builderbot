@@ -53,6 +53,13 @@ class CoreClass<P extends ProviderClass = any, D extends MemoryDB = any> extends
         host: undefined,
     }
 
+    /**
+     * @description
+     * - Setup flowClass
+     * - Setup database
+     * - Setup provider
+     * - Setup generalArgs
+     */
     constructor(_flow: any, _database: D, _provider: P, _args: GeneralArgs) {
         super()
         this.flowClass = _flow
@@ -283,16 +290,21 @@ class CoreClass<P extends ProviderClass = any, D extends MemoryDB = any> extends
             const listIdsRefCallbacks = messageToSend.map((i: { ref: string }) => i.ref)
             const listProcessWait = this.queuePrincipal.getIdsCallback(from)
 
+            // Registrar/actualizar el conjunto de IDs que están en curso para este "from"
             if (!listProcessWait.length) {
                 this.queuePrincipal.setIdsCallbacks(from, listIdsRefCallbacks)
-            } else {
-                const lastMessage = messageToSend[messageToSend.length - 1]
-                await this.database.save({ ...lastMessage, from: numberOrId })
-
-                if (listProcessWait.includes(lastMessage.ref)) {
-                    this.queuePrincipal.clearQueue(from)
-                }
+                return
             }
+
+            // Si ya hay una lista en proceso, actualizamos la referencia
+            this.queuePrincipal.setIdsCallbacks(from, listIdsRefCallbacks)
+
+            // Guardamos el último mensaje como hacía la implementación previa para conservar historial
+            const lastMessage = messageToSend[messageToSend.length - 1]
+            await this.database.save({ ...lastMessage, from: numberOrId })
+
+            // Evitamos limpiar agresivamente toda la cola; los duplicados se gestionan en la propia cola
+            return
         }
 
         const enqueueMsg = async (numberOrId: string, ctxMessage: TContext, from: string) => {
@@ -685,7 +697,12 @@ class CoreClass<P extends ProviderClass = any, D extends MemoryDB = any> extends
             ) {
                 if (answer !== '__capture_only_intended__') {
                     const respMessage = await this.provider.sendMessage(numberOrId, answer, ctxMessage)
-                    this.emit('send_message', { ...ctxMessage, from: numberOrId, answer, respMessage })
+                    this.emit('send_message', {
+                        ...ctxMessage,
+                        from: numberOrId,
+                        answer: answer,
+                        respMessage: respMessage,
+                    } as TContext & { from: string; answer: string | string[]; respMessage: any })
                 }
             }
             await this.database.save({ ...ctxMessage, from: numberOrId })
@@ -730,6 +747,21 @@ class CoreClass<P extends ProviderClass = any, D extends MemoryDB = any> extends
                 update: this.stateHandler.updateState({ from: number }),
                 clear: this.stateHandler.clear(number),
             }),
+            emit: (eventName: 'send_message' | 'notice', args: Record<string, any> & { from: string }) => {
+                if (eventName === 'send_message') {
+                    this.emit('send_message', {
+                        ...args,
+                        from: args.from,
+                        answer: args.answer || '',
+                        respMessage: args.respMessage || null,
+                    } as TContext & { from: string; answer: string | string[]; respMessage: any })
+                } else if (eventName === 'notice') {
+                    this.emit('notice', {
+                        title: args.title || '',
+                        instructions: args.instructions || [],
+                    })
+                }
+            },
             globalState: (): BotStateGlobal => ({
                 get: this.globalStateHandler.get(),
                 getAllState: this.globalStateHandler.getAllState,
@@ -753,6 +785,7 @@ class CoreClass<P extends ProviderClass = any, D extends MemoryDB = any> extends
                       dispatch: DispatchFn
                       state: (number: string) => BotStateStandAlone
                       globalState: () => BotStateGlobal
+                      emit: (eventName: string, args: Record<string, any> & { from: string }) => void
                   })
                 | undefined,
             req: any,

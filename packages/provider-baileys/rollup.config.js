@@ -11,13 +11,21 @@ export default {
             format: 'cjs',
             exports: 'named',
         },
+        {
+            dir: 'dist',
+            entryFileNames: '[name].mjs',
+            format: 'es',
+            exports: 'named',
+        },
     ],
     plugins: [
         json(),
         commonjs(),
         nodeResolve({
             resolveOnly: (module) =>
-                !/ffmpeg|baileys|@adiwajshing|link-preview-js|@builderbot\/bot|sharp/i.test(module),
+                !/ffmpeg|@adiwajshing|link-preview-js|@leifermendez\/baileys|baileys|@builderbot\/bot|sharp/i.test(
+                    module
+                ),
         }),
         typescript(),
         // terser()

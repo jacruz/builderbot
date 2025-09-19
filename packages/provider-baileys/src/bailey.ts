@@ -1,6 +1,7 @@
 import { ProviderClass, utils } from '@builderbot/bot'
 import type { BotContext, Button, SendOptions } from '@builderbot/bot/dist/types'
 import type { Boom } from '@hapi/boom'
+import { WAVersion, WABrowserDescription } from 'baileys'
 import { Console } from 'console'
 import type { PathOrFileDescriptor } from 'fs'
 import { createReadStream, createWriteStream, readFileSync } from 'fs'
@@ -34,14 +35,20 @@ import {
 } from './baileyWrapper'
 import { releaseTmp } from './releaseTmp'
 import type { BaileyGlobalVendorArgs } from './type'
-import { baileyGenerateImage, baileyCleanNumber, baileyIsValidNumber, emptyDirSessions } from './utils'
+import {
+    baileyGenerateImage,
+    baileyCleanNumber,
+    baileyIsValidNumber,
+    emptyDirSessions,
+    baileyCleanNumberWithLid,
+} from './utils'
 
 class BaileysProvider extends ProviderClass<WASocket> {
     public globalVendorArgs: BaileyGlobalVendorArgs = {
         name: `bot`,
         gifPlayback: false,
         usePairingCode: false,
-        browser: ['Windows', 'Chrome', 'Chrome 114.0.5735.198'],
+        browser: ['Windows', 'Chrome', 'Chrome 114.0.5735.198'] as WABrowserDescription,
         phoneNumber: null,
         useBaileysStore: true,
         port: 3000,
@@ -104,10 +111,91 @@ class BaileysProvider extends ProviderClass<WASocket> {
 
         this.globalVendorArgs = { ...this.globalVendorArgs, ...args }
 
+        this.setupConsoleFilter()
         this.setupCleanupHandlers()
         this.setupPeriodicCleanup()
     }
 
+    /**
+     * Setup console filter to simplify specific error messages
+     * @description
+     * - Override console.log, console.error, console.warn to show simplified versions of decrypt-related errors
+     * - Shows only error titles without stack traces for "Failed to decrypt message", "Bad MAC", "Session error" messages
+     * - Shows simplified messages for session management: "Closing open session", "Closing session: SessionEntry"
+     * - Other messages are displayed normally
+     */
+    private setupConsoleFilter() {
+        const originalConsoleLog = console.log
+        const originalConsoleError = console.error
+        const originalConsoleWarn = console.warn
+
+        const shouldFilterMessage = (message: string): string | false => {
+            const messageStr = String(message)
+
+            // Detectar errores de descifrado y mostrar solo el título
+            if (messageStr.includes('Failed to decrypt message')) {
+                return 'Tratando de descifrar mensaje... (stack trace hidden)'
+            }
+            if (messageStr.includes('Bad MAC') || messageStr.includes('Error: Bad MAC')) {
+                return 'Re-intentando.. MAC (stack trace hidden)'
+            }
+            if (messageStr.includes('Session error')) {
+                return 'Re-intentando.. Session  (stack trace hidden)'
+            }
+            if (messageStr.includes('decrypt message with any known session')) {
+                return 'Re-intentando.. Decrypt (stack trace hidden)'
+            }
+            if (messageStr.includes('Closing open session in favor of incoming prekey bundle')) {
+                return '🔄 Session replaced by prekey bundle (details hidden)'
+            }
+            if (messageStr.includes('Closing session: SessionEntry')) {
+                return '🔄 Session closed (details hidden)'
+            }
+
+            return false // No filtrar
+        }
+
+        console.log = (...args: any[]) => {
+            const message = args.join(' ')
+            const filteredMessage = shouldFilterMessage(message)
+            if (filteredMessage) {
+                originalConsoleLog(filteredMessage)
+            } else {
+                originalConsoleLog.apply(console, args)
+            }
+        }
+
+        console.error = (...args: any[]) => {
+            const message = args.join(' ')
+            const filteredMessage = shouldFilterMessage(message)
+            if (filteredMessage) {
+                originalConsoleError(filteredMessage)
+            } else {
+                originalConsoleError.apply(console, args)
+            }
+        }
+
+        console.warn = (...args: any[]) => {
+            const message = args.join(' ')
+            const filteredMessage = shouldFilterMessage(message)
+            if (filteredMessage) {
+                originalConsoleWarn(filteredMessage)
+            } else {
+                originalConsoleWarn.apply(console, args)
+            }
+        }
+    }
+
+    /**
+     * Setup cleanup handlers
+     * @description
+     * - Remove existing listeners to prevent duplicates
+     * - Add new listeners
+     * - Add cleanup function to all listeners
+     * - Add cleanup function to uncaughtException and unhandledRejection
+     * - Add cleanup function to SIGINT, SIGTERM, SIGUSR1, SIGUSR2
+     * - Add cleanup function to process.exit
+     */
     private setupCleanupHandlers() {
         const cleanup = () => {
             this.logger.log(`[${new Date().toISOString()}] Iniciando limpieza de recursos...`)
@@ -256,13 +344,13 @@ class BaileysProvider extends ProviderClass<WASocket> {
         try {
             const sock = makeWASocketOther({
                 logger: loggerBaileys,
-                version: [2, 3000, 1023223821],
+                version: [2, 3000, 1023223821] as WAVersion,
                 printQRInTerminal: false,
                 auth: {
                     creds: state.creds,
                     keys: makeCacheableSignalKeyStore(state.keys, loggerBaileys),
                 },
-                browser: this.globalVendorArgs.browser,
+                browser: this.globalVendorArgs.browser as WABrowserDescription,
                 syncFullHistory: false,
                 markOnlineOnConnect: false,
                 generateHighQualityLinkPreview: true,
@@ -308,7 +396,7 @@ class BaileysProvider extends ProviderClass<WASocket> {
                 if (this.globalVendorArgs.phoneNumber) {
                     const phoneNumberClean = utils.removePlus(this.globalVendorArgs.phoneNumber)
                     await utils.delay(2000)
-                    const code = await sock.requestPairingCode(phoneNumberClean)
+                    const code = await sock.requestPairingCode(phoneNumberClean, '')
 
                     this.emit('require_action', {
                         title: '⚡⚡ ACTION REQUIRED ⚡⚡',
@@ -440,145 +528,182 @@ class BaileysProvider extends ProviderClass<WASocket> {
                     }
                 }
 
-                const [messageCtx] = messages
-
-                if (messageCtx?.messageStubParameters?.length && messageCtx.messageStubParameters[0].includes('absent'))
-                    return
-                if (
-                    messageCtx?.messageStubParameters?.length &&
-                    messageCtx.messageStubParameters[0].includes('No session')
-                )
-                    return
-                if (
-                    messageCtx?.messageStubParameters?.length &&
-                    messageCtx.messageStubParameters[0].includes('Bad MAC')
-                )
-                    return
-                if (
-                    messageCtx?.messageStubParameters?.length &&
-                    messageCtx.messageStubParameters[0].includes('Invalid')
-                ) {
-                    if (this.globalVendorArgs.fallBackAction) {
-                        try {
-                            await this.globalVendorArgs.fallBackAction(messageCtx)
-                        } catch (error) {
-                            return
-                        }
-                        return
-                    }
-
+                for (const messageCtx of messages) {
                     if (
-                        this.globalVendorArgs.experimentalSyncMessage &&
-                        this.globalVendorArgs.experimentalSyncMessage.length
+                        messageCtx?.messageStubParameters?.length &&
+                        messageCtx.messageStubParameters[0].includes('absent')
+                    )
+                        continue
+                    if (
+                        messageCtx?.messageStubParameters?.length &&
+                        messageCtx.messageStubParameters[0].includes('No session')
+                    )
+                        continue
+                    if (
+                        messageCtx?.messageStubParameters?.length &&
+                        messageCtx.messageStubParameters[0].includes('Bad MAC')
+                    )
+                        continue
+                    if (
+                        messageCtx?.messageStubParameters?.length &&
+                        messageCtx.messageStubParameters[0].includes('Invalid')
                     ) {
-                        if (baileyIsValidNumber(messageCtx?.key?.remoteJid)) {
-                            await pingMessageSync(messageCtx)
+                        if (this.globalVendorArgs.fallBackAction) {
+                            try {
+                                await this.globalVendorArgs.fallBackAction(messageCtx)
+                            } catch (error) {
+                                continue
+                            }
+                            continue
                         }
-                        return
+
+                        if (
+                            this.globalVendorArgs.experimentalSyncMessage &&
+                            this.globalVendorArgs.experimentalSyncMessage.length
+                        ) {
+                            if (baileyIsValidNumber(messageCtx?.key?.remoteJid)) {
+                                await pingMessageSync(messageCtx)
+                            }
+                            continue
+                        }
+                        continue
                     }
-                    return
-                }
-                // if (((messageCtx?.message?.protocolMessage?.type) as unknown as string) === 'EPHEMERAL_SETTING') return
+                    // if (((messageCtx?.message?.protocolMessage?.type) as unknown as string) === 'EPHEMERAL_SETTING') continue
 
-                const textToBody =
-                    messageCtx?.message?.ephemeralMessage?.message?.extendedTextMessage?.text ??
-                    messageCtx?.message?.extendedTextMessage?.text ??
-                    messageCtx?.message?.conversation
+                    const textToBody =
+                        messageCtx?.message?.ephemeralMessage?.message?.extendedTextMessage?.text ??
+                        messageCtx?.message?.extendedTextMessage?.text ??
+                        messageCtx?.message?.conversation
 
-                // if (idWs) this.idsDuplicates.push(idWs)
+                    if (textToBody) {
+                        if (textToBody === 'requestPlaceholder' && !(messageCtx as any).requestId) {
+                            try {
+                                if (this.vendor.requestPlaceholderResend) {
+                                    const messageId = await this.vendor.requestPlaceholderResend(messageCtx.key)
+                                    this.logger.log(
+                                        `[${new Date().toISOString()}] Requested placeholder resync, id=${messageId}`
+                                    )
+                                }
+                                continue // No procesar como mensaje normal
+                            } catch (e) {
+                                this.logger.log(`[${new Date().toISOString()}] Error requesting placeholder resync:`, e)
+                            }
+                        }
 
-                let payload = {
-                    ...messageCtx,
-                    body: textToBody,
-                    name: messageCtx?.pushName,
-                    from: messageCtx?.key?.remoteJid,
-                }
+                        if (textToBody === 'onDemandHistSync') {
+                            try {
+                                if (this.vendor.fetchMessageHistory) {
+                                    const messageId = await this.vendor.fetchMessageHistory(
+                                        50,
+                                        messageCtx.key,
+                                        messageCtx.messageTimestamp
+                                    )
+                                    this.logger.log(
+                                        `[${new Date().toISOString()}] Requested on-demand sync, id=${messageId}`
+                                    )
+                                }
+                                continue // No procesar como mensaje normal
+                            } catch (e) {
+                                this.logger.log(`[${new Date().toISOString()}] Error requesting history sync:`, e)
+                            }
+                        }
 
-                //Detectar location
-                if (messageCtx.message?.locationMessage) {
-                    const { degreesLatitude, degreesLongitude } = messageCtx.message.locationMessage
-                    if (typeof degreesLatitude === 'number' && typeof degreesLongitude === 'number') {
-                        payload = {
-                            ...payload,
-                            body: utils.generateRefProvider('_event_location_'),
+                        if ((messageCtx as any).requestId) {
+                            this.logger.log(
+                                `[${new Date().toISOString()}] Message received from phone, id=${
+                                    (messageCtx as any).requestId
+                                }`,
+                                messageCtx
+                            )
                         }
                     }
-                }
 
-                //Detectar video
-                if (messageCtx.message?.videoMessage) {
-                    payload = { ...payload, body: utils.generateRefProvider('_event_media_') }
-                }
-
-                //Detectar Sticker
-                if (messageCtx.message?.stickerMessage) {
-                    payload = { ...payload, body: utils.generateRefProvider('_event_media_') }
-                }
-
-                //Detectar media
-                if (messageCtx.message?.imageMessage) {
-                    payload = { ...payload, body: utils.generateRefProvider('_event_media_') }
-                }
-
-                //Detectar file
-                if (messageCtx.message?.documentMessage || messageCtx.message?.documentWithCaptionMessage) {
-                    payload = { ...payload, body: utils.generateRefProvider('_event_document_') }
-                }
-
-                //Detectar voice note
-                if (messageCtx.message?.audioMessage) {
-                    payload = { ...payload, body: utils.generateRefProvider('_event_voice_note_') }
-                }
-
-                //Detectar order message
-                if (messageCtx.message?.orderMessage) {
-                    payload = { ...payload, body: utils.generateRefProvider('_event_order_') }
-                }
-
-                if (payload.from === 'status@broadcast') return
-                payload.from = baileyCleanNumber(payload.from, true)
-
-                if (this.globalVendorArgs.writeMyself === 'none' && payload?.key?.fromMe) return
-                if (
-                    this.globalVendorArgs.host?.phone !== payload.from &&
-                    payload?.key?.fromMe &&
-                    !['both'].includes(this.globalVendorArgs.writeMyself)
-                )
-                    return
-                if (
-                    this.globalVendorArgs.host?.phone === payload.from &&
-                    !['both', 'host'].includes(this.globalVendorArgs.writeMyself)
-                )
-                    return
-
-                if (!baileyIsValidNumber(payload.from)) {
-                    return
-                }
-
-                const btnCtx = payload?.message?.buttonsResponseMessage?.selectedDisplayText
-                if (btnCtx) payload.body = btnCtx
-
-                const listRowId = payload?.message?.listResponseMessage?.title
-                if (listRowId) payload.body = listRowId
-
-                const processDuplicate = () => {
-                    if (messageCtx?.key?.id) {
-                        const idWs = `${messageCtx.key.id}__${payload.from}`
-                        const isDuplicate = this.idsDuplicates.includes(idWs)
-                        if (isDuplicate) {
-                            this.idsDuplicates = []
-                            return false
-                        }
-                        if (this.idsDuplicates.length > 10) {
-                            this.idsDuplicates = []
-                        }
-                        this.idsDuplicates.push(idWs)
+                    let payload = {
+                        ...messageCtx,
+                        body: textToBody,
+                        name: messageCtx?.pushName,
+                        from: baileyCleanNumberWithLid(messageCtx?.key),
                     }
-                    return true
-                }
 
-                if (processDuplicate()) {
-                    this.emit('message', payload)
+                    if (messageCtx.message?.locationMessage) {
+                        const { degreesLatitude, degreesLongitude } = messageCtx.message.locationMessage
+                        if (typeof degreesLatitude === 'number' && typeof degreesLongitude === 'number') {
+                            payload = {
+                                ...payload,
+                                body: utils.generateRefProvider('_event_location_'),
+                            }
+                        }
+                    }
+
+                    if (messageCtx.message?.videoMessage) {
+                        payload = { ...payload, body: utils.generateRefProvider('_event_media_') }
+                    }
+
+                    if (messageCtx.message?.stickerMessage) {
+                        payload = { ...payload, body: utils.generateRefProvider('_event_media_') }
+                    }
+
+                    if (messageCtx.message?.imageMessage) {
+                        payload = { ...payload, body: utils.generateRefProvider('_event_media_') }
+                    }
+
+                    if (messageCtx.message?.documentMessage || messageCtx.message?.documentWithCaptionMessage) {
+                        payload = { ...payload, body: utils.generateRefProvider('_event_document_') }
+                    }
+
+                    if (messageCtx.message?.audioMessage) {
+                        payload = { ...payload, body: utils.generateRefProvider('_event_voice_note_') }
+                    }
+
+                    if (messageCtx.message?.orderMessage) {
+                        payload = { ...payload, body: utils.generateRefProvider('_event_order_') }
+                    }
+
+                    if (payload.from === 'status@broadcast') continue
+                    payload.from = baileyCleanNumber(payload.from, true)
+
+                    if (this.globalVendorArgs.writeMyself === 'none' && payload?.key?.fromMe) continue
+                    if (
+                        this.globalVendorArgs.host?.phone !== payload.from &&
+                        payload?.key?.fromMe &&
+                        !['both'].includes(this.globalVendorArgs.writeMyself)
+                    )
+                        continue
+                    if (
+                        this.globalVendorArgs.host?.phone === payload.from &&
+                        !['both', 'host'].includes(this.globalVendorArgs.writeMyself)
+                    )
+                        continue
+
+                    if (!baileyIsValidNumber(payload.from)) {
+                        continue
+                    }
+
+                    const btnCtx = payload?.message?.buttonsResponseMessage?.selectedDisplayText
+                    if (btnCtx) payload.body = btnCtx
+
+                    const listRowId = payload?.message?.listResponseMessage?.title
+                    if (listRowId) payload.body = listRowId
+
+                    const processDuplicate = () => {
+                        if (messageCtx?.key?.id) {
+                            const idWs = `${messageCtx.key.id}__${payload.from}`
+                            const isDuplicate = this.idsDuplicates.includes(idWs)
+                            if (isDuplicate) {
+                                this.idsDuplicates = []
+                                return false
+                            }
+                            if (this.idsDuplicates.length > 10) {
+                                this.idsDuplicates = []
+                            }
+                            this.idsDuplicates.push(idWs)
+                        }
+                        return true
+                    }
+
+                    if (processDuplicate()) {
+                        this.emit('message', payload)
+                    }
                 }
             },
         },
