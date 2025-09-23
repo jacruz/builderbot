@@ -11,7 +11,7 @@ import { join, basename, resolve } from 'path'
 import Queue from 'queue-promise'
 
 import { MetaCoreVendor } from './core'
-import { downloadFile, getProfile } from '../utils'
+import { downloadFile, getProfile, verifyToken } from '../utils'
 import { parseMetaNumber } from '../utils/number'
 
 import type { MetaInterface } from '~/interface/meta'
@@ -67,9 +67,21 @@ class MetaProvider extends ProviderClass<MetaInterface> implements MetaInterface
             .post('/webhook', this.vendor.incomingMsg)
     }
 
+    /**
+     * Get the profile of a WhatsApp user
+     * @returns The profile of the WhatsApp user
+     */
     protected async afterHttpServerInit(): Promise<void> {
         try {
             const { version, numberId, jwtToken } = this.globalVendorArgs
+
+            // Verify token first
+            const tokenVerification = await verifyToken(jwtToken)
+            if (!tokenVerification.data?.is_valid) {
+                throw new Error('Invalid token')
+            }
+
+            // Get profile
             const profile = await getProfile(version, numberId, jwtToken)
             const host = {
                 ...profile,
@@ -78,13 +90,33 @@ class MetaProvider extends ProviderClass<MetaInterface> implements MetaInterface
             this.vendor.emit('host', host)
             this.emit('ready')
         } catch (err) {
+            const errorMap = {
+                'Invalid token': { title: '🔑 TOKEN ERROR', msg: 'Check META_ACCESS_TOKEN in .env' },
+                timeout: { title: '🌐 TIMEOUT', msg: 'Meta API not responding' },
+                '401': { title: '🔐 UNAUTHORIZED', msg: 'Invalid credentials' },
+                '403': { title: '🚫 FORBIDDEN', msg: 'Token lacks permissions' },
+                '500': { title: '🔧 SERVER ERROR', msg: 'Meta API issues' },
+            }
+
+            const errorKey = err.message.includes('Invalid token')
+                ? 'Invalid token'
+                : err.message.includes('timeout')
+                ? 'timeout'
+                : err.response?.status === 401
+                ? '401'
+                : err.response?.status === 403
+                ? '403'
+                : err.response?.status >= 500
+                ? '500'
+                : 'default'
+
+            const error = errorMap[errorKey] || { title: '🟠 ERROR AUTH', msg: 'Check credentials' }
+
             this.emit('notice', {
-                title: '🟠 ERROR AUTH  🟠',
-                instructions: [
-                    `Error connecting to META, make sure you have the correct credentials, .env`,
-                    `https://builderbot.vercel.app/en/providers/meta`,
-                ],
+                title: error.title,
+                instructions: [error.msg, 'https://builderbot.app/en/providers/meta'],
             })
+            this.emit('error', err)
         }
     }
 
@@ -488,7 +520,7 @@ class MetaProvider extends ProviderClass<MetaInterface> implements MetaInterface
                             screen: screenName,
                             data: data ? data : { '<CUSTOM_KEY>': '<CUSTOM_VALUE>' },
                         },
-                        ...(isDraftFlow && { mode: 'draft' })
+                        ...(isDraftFlow && { mode: 'draft' }),
                     },
                 },
             },
